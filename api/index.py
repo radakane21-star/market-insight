@@ -50,13 +50,25 @@ def fetch_feed_items(source):
 
         root = ET.fromstring(resp.content)
 
-        for item in root.findall(".//item")[:MAX_ITEMS_PER_SOURCE]:
-            title_el = item.find("title")
-            desc_el = item.find("description")
+        all_items_el = [el for el in root.iter() if el.tag.split("}")[-1] == "item"]
+
+        for item in all_items_el[:MAX_ITEMS_PER_SOURCE]:
+            title_el = None
+            desc_el = None
+            for child in item:
+                local_name = child.tag.split("}")[-1]
+                if local_name == "title" and title_el is None:
+                    title_el = child
+                elif local_name == "description" and desc_el is None:
+                    desc_el = child
+
             title = title_el.text.strip() if title_el is not None and title_el.text else ""
             description = strip_html(desc_el.text) if desc_el is not None and desc_el.text else ""
             if title:
                 items.append({"source": source["name"], "title": title, "description": description})
+
+        if not items:
+            return items, f"{source['name']}: 0件のアイテムが見つかりませんでした（root tag: {root.tag}）"
 
         return items, None
 
@@ -200,3 +212,4 @@ class handler(BaseHTTPRequestHandler):
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(f"システムレベルの予期しないエラー: {e}".encode("utf-8"))
+            
