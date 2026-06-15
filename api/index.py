@@ -2,6 +2,8 @@ import os
 import json
 import re
 import html
+import base64
+import datetime
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler
 import requests
@@ -35,9 +37,82 @@ RSS_SOURCES = [
 
 REQUEST_TIMEOUT = 8
 MAX_ITEMS_PER_SOURCE = 8
+MAX_HISTORY = 24
+HISTORY_PATH = "data/history.json"
+
+
+def _github_headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "MarketInsight/1.0",
+    }
+
+
+def load_history():
+    """GitHub上のdata/history.jsonを読み込む。
+    存在しない/読み込み失敗時は (空リスト, None) を返す（クラッシュさせない）。"""
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPO")
+    if not token or not repo:
+        return [], None
+
+    url = f"https://api.github.com/repos/{repo}/contents/{HISTORY_PATH}"
+    try:
+        resp = requests.get(url, headers=_github_headers(token), timeout=REQUEST_TIMEOUT)
+        if resp.status_code == 404:
+            return [], None
+        if resp.status_code != 200:
+            return [], None
+
+        data = resp.json()
+        sha = data.get("sha")
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        history = json.loads(content)
+        if not isinstance(history, list):
+            return [], sha
+        return history, sha
+
+    except Exception:
+        return [], None
+
+
+def save_history(history, sha):
+    """history(list)をGitHub上のdata/history.jsonに保存する。
+    失敗してもクラッシュさせず、呼び出し元に成功/失敗だけを返す。"""
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPO")
+    if not token or not repo:
+        return False, "GITHUB_TOKEN/GITHUB_REPOが未設定"
+
+    url = f"https://api.github.com/repos/{repo}/contents/{HISTORY_PATH}"
+    body_text = json.dumps(history, ensure_ascii=False, indent=2)
+    payload = {
+        "message": "Update market insight history",
+        "content": base64.b64encode(body_text.encode("utf-8")).decode("ascii"),
+    }
+    if sha:
+        payload["sha"] = sha
+
+    try:
+        resp = requests.put(
+            url,
+            headers=_github_headers(token),
+            json=payload,
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code in (200, 201):
+            return True, None
+        if resp.status_code == 409:
+            return False, "競合のため今回はスキップしました"
+        return False, f"GitHub保存エラー: HTTP {resp.status_code}"
+
+    except Exception as e:
+        return False, f"GitHub保存エラー: {e}"
 
 
 def fetch_feed_items(source):
+    """1つのRSSソースから記事タイトル・概要を抽出する。失敗時は例外を投げず空リストを返す。"""
     items = []
     try:
         resp = requests.get(
@@ -104,7 +179,56 @@ SYSTEM_PROMPT = (
 )
 
 
+def get_result_with_history():
+    """
+    1時間以内に最新の履歴があればそれを再利用し、なければ新規に分析して
+    履歴(GitHub上のdata/history.json、最大MAX_HISTORY件)に追記保存する。
+    GitHub未設定・取得失敗時は、履歴機能なしで毎回新規分析する。
+    """
+    history, sha = load_history()
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    if history:
+        try:
+            latest = history[0]
+            collected_at = datetime.datetime.fromisoformat(latest["collected_at"])
+            age = now - collected_at
+            if age < datetime.timedelta(hours=1):
+                result = dict(latest["result"])
+                result["history"] = history
+                result["from_cache"] = True
+                return result
+        except Exception:
+            pass
+
+    result = get_market_analysis()
+    result["from_cache"] = False
+
+    entry = {
+        "collected_at": now.isoformat(),
+        "result": {
+            "status": result["status"],
+            "sources_used": result["sources_used"],
+            "source_errors": result["source_errors"],
+            "analysis": result["analysis"],
+            "error": result["error"],
+        },
+    }
+    new_history = [entry] + history
+    new_history = new_history[:MAX_HISTORY]
+
+    saved, save_err = save_history(new_history, sha)
+    result["history_save"] = "ok" if saved else (save_err or "保存スキップ")
+    result["history"] = new_history
+
+    return result
+
+
 def get_market_analysis():
+    """
+    複数の公式RSSからデータを取得し、Gemini APIで客観的な市場分析を行う。
+    どのステップで失敗しても、エラー情報を含むJSON文字列を返す（クラッシュさせない）。
+    """
     result = {
         "status": "ok",
         "sources_used": [],
@@ -162,6 +286,7 @@ def get_market_analysis():
 
 
 def render_markdown(result):
+    """分析結果を読みやすいMarkdownにレンダリングする"""
     lines = []
     lines.append("# MarketInsight レポート\n")
 
@@ -185,13 +310,27 @@ def render_markdown(result):
     lines.append("---\n")
     lines.append(result["analysis"])
 
+    cache_note = "（キャッシュ済みデータ）" if result.get("from_cache") else "（新規取得）"
+    lines.append(f"\n\n---\n*{cache_note}*")
+
+    history = result.get("history") or []
+    if len(history) > 1:
+        lines.append("\n## 📚 過去の履歴\n")
+        for entry in history[1:]:
+            ts = entry.get("collected_at", "?")
+            r = entry.get("result", {})
+            status_mark = "✅" if r.get("status") == "ok" else "⚠️"
+            lines.append(f"- {status_mark} {ts}")
+
     return "\n".join(lines)
 
 
 class handler(BaseHTTPRequestHandler):
+    """Vercelがリクエストを受け取るためのハンドラークラス"""
+
     def do_GET(self):
         try:
-            result = get_market_analysis()
+            result = get_result_with_history()
 
             wants_json = "format=json" in (self.path or "")
 
