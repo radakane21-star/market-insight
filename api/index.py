@@ -18,31 +18,26 @@ def strip_html(text):
     no_tags = _TAG_RE.sub(" ", text)
     return html.unescape(no_tags).strip()
 
-# ==========================================
-# 安全な公式データソースの設定
-# 複数ソースを用意し、1つが失敗・終了しても他で継続できるようにする
-# ==========================================
 RSS_SOURCES = [
-    {
-        "name": "Google Trends (JP)",
-        "url": "https://trends.google.co.jp/trends/trendingsearches/daily/rss?geo=JP",
-    },
     {
         "name": "Hatena Bookmark - IT",
         "url": "https://b.hatena.ne.jp/hotentry/it.rss",
     },
     {
-        "name": "Hatena Bookmark - Business",
-        "url": "https://b.hatena.ne.jp/hotentry/business.rss",
+        "name": "Hatena Bookmark - Economics",
+        "url": "https://b.hatena.ne.jp/hotentry/economics.rss",
+    },
+    {
+        "name": "Hatena Bookmark - Life",
+        "url": "https://b.hatena.ne.jp/hotentry/life.rss",
     },
 ]
 
-REQUEST_TIMEOUT = 8  # 秒。Vercelの実行時間制限内に収める
+REQUEST_TIMEOUT = 8
 MAX_ITEMS_PER_SOURCE = 8
 
 
 def fetch_feed_items(source):
-    """1つのRSSソースから記事タイトル・概要を抽出する。失敗時は例外を投げず空リストを返す。"""
     items = []
     try:
         resp = requests.get(
@@ -78,7 +73,6 @@ def build_context_text(all_items):
     for it in all_items:
         line = f"・[{it['source']}] {it['title']}"
         if it["description"]:
-            # 長すぎる概要は切り詰めてプロンプトを軽くする
             desc = it["description"][:200]
             line += f"\n  概要: {desc}"
         lines.append(line)
@@ -99,10 +93,6 @@ SYSTEM_PROMPT = (
 
 
 def get_market_analysis():
-    """
-    複数の公式RSSからデータを取得し、Gemini APIで客観的な市場分析を行う。
-    どのステップで失敗しても、エラー情報を含むJSON文字列を返す（クラッシュさせない）。
-    """
     result = {
         "status": "ok",
         "sources_used": [],
@@ -111,7 +101,6 @@ def get_market_analysis():
         "error": None,
     }
 
-    # 1. APIキーの確認
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         result["status"] = "error"
@@ -121,7 +110,6 @@ def get_market_analysis():
         )
         return result
 
-    # 2. 各RSSソースからデータ収集
     all_items = []
     for source in RSS_SOURCES:
         items, err = fetch_feed_items(source)
@@ -138,7 +126,6 @@ def get_market_analysis():
 
     context_text = build_context_text(all_items)
 
-    # 3. Geminiによる分析
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
@@ -147,7 +134,6 @@ def get_market_analysis():
 
         response = model.generate_content(full_prompt)
 
-        # レスポンスが空・ブロックされた場合への対処
         analysis_text = getattr(response, "text", None)
         if not analysis_text:
             result["status"] = "error"
@@ -164,7 +150,6 @@ def get_market_analysis():
 
 
 def render_markdown(result):
-    """分析結果を読みやすいMarkdownにレンダリングする"""
     lines = []
     lines.append("# MarketInsight レポート\n")
 
@@ -192,13 +177,10 @@ def render_markdown(result):
 
 
 class handler(BaseHTTPRequestHandler):
-    """Vercelがリクエストを受け取るためのハンドラークラス"""
-
     def do_GET(self):
         try:
             result = get_market_analysis()
 
-            # ?format=json でJSON出力にも対応
             wants_json = "format=json" in (self.path or "")
 
             if wants_json:
@@ -208,14 +190,12 @@ class handler(BaseHTTPRequestHandler):
                 body = render_markdown(result).encode("utf-8")
                 content_type = "text/markdown; charset=utf-8"
 
-            status_code = 200 if result["status"] == "ok" else 200  # エラーも200で内容として返す
-            self.send_response(status_code)
+            self.send_response(200)
             self.send_header("Content-type", content_type)
             self.end_headers()
             self.wfile.write(body)
 
         except Exception as e:
-            # 最終防衛線：絶対にクラッシュさせない
             self.send_response(500)
             self.send_header("Content-type", "text/plain; charset=utf-8")
             self.end_headers()
