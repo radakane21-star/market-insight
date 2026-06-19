@@ -1,5 +1,19 @@
 [
   {
+    "collected_at": "2026-06-19T13:17:35.542757+00:00",
+    "result": {
+      "status": "error",
+      "sources_used": [
+        "Hatena Bookmark - IT",
+        "Hatena Bookmark - Economics",
+        "Hatena Bookmark - Life"
+      ],
+      "source_errors": [],
+      "analysis": null,
+      "error": "Gemini APIの呼び出し中にエラーが発生しました: Invalid operation: The `response.parts` quick accessor requires a single candidate, but but `response.candidates` is empty.\nThis appears to be caused by a blocked prompt, see `response.prompt_feedback`: block_reason: PROHIBITED_CONTENT\n"
+    }
+  },
+  {
     "collected_at": "2026-06-16T10:29:02.283030+00:00",
     "result": {
       "status": "ok",
